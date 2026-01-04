@@ -98,6 +98,9 @@ class Tenant:
                         name
                     }
                   }
+                  visitor {
+                    name
+                  }
                 }
               }
             }

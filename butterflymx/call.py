@@ -6,6 +6,7 @@ class Call:
         self.type = data.get('notificationType')
         self.device = data.get('device', {}).get('name') if data.get('device') else "Unknown"
         self.image_url = data.get('imageUrl')
+        self.visitor_name = data.get('visitor', {}).get('name') if data.get('visitor') else "Unknown"
 
     def __repr__(self):
         return f"<Call {self.id}: {self.status} at {self.logged_at} from {self.device}>"
