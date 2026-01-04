@@ -2,6 +2,7 @@ import json
 from .door import Door
 from .message import Message
 from .call import Call
+from .access import Access
 
 class Tenant:
     def __init__(self, data, client):
@@ -55,7 +56,10 @@ class Tenant:
                     id
                     body
                     createdAt
+                    imageUrl
+                    origin
                     source {
+
                       ... on Device {
                         name
                       }
@@ -114,3 +118,40 @@ class Tenant:
                 for call_data in tenant_node['calls']['nodes']:
                     calls.append(Call(call_data))
         return calls
+
+    async def get_access_logs(self):
+        query = """
+        query TenantDoorReleases($tenantIds: [ID!]!) {
+          nodes(ids: $tenantIds) {
+            ... on Tenant {
+              doorReleases {
+                nodes {
+                  id
+                  loggedAt
+                  imageUrl
+                  type
+                  method
+                  accessPoint {
+                    name
+                  }
+                  device {
+                    ... on Device {
+                      name
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        print(f"Fetching Access Logs (Door Releases) for Tenant {self.id}...")
+        data = await self._client.query_graphql(query, variables={"tenantIds": [self.id]})
+        
+        access_logs = []
+        if data and 'data' in data and 'nodes' in data['data']:
+            tenant_node = data['data']['nodes'][0]
+            if tenant_node and 'doorReleases' in tenant_node:
+                for access_data in tenant_node['doorReleases']['nodes']:
+                    access_logs.append(Access(access_data))
+        return access_logs

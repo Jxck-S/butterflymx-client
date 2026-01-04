@@ -3,8 +3,7 @@ import getpass
 from butterflymx import ButterflyMXClient
 
 async def main():
-    email = "your_email@example.com"
-    password = "your_password"
+
     
     print(f"Using credentials for: {email}")
         
@@ -29,13 +28,25 @@ async def main():
             msgs = await t.get_messages()
             print(f"  Found {len(msgs)} messages (showing last 3):")
             for m in msgs[:3]:
-                 print(f"    - [{m.created_at}] {m.source}: {m.body}")
+                 print(f"    - [{m.created_at}] From: {m.visitor_name} (Source: {m.source})")
+                 print(f"      Body: {m.body}")
+                 print(f"      Image: {m.image_url}")
 
             # Fetch & Print Calls
             calls = await t.get_calls()
             print(f"  Found {len(calls)} calls (showing last 3):")
             for c in calls[:3]:
                  print(f"    - [{c.logged_at}] {c.device} ({c.type}): {c.status}")
+                 print(f"      Image: {c.image_url}")
+
+            # Fetch & Print Access Logs
+            access_logs = await t.get_access_logs()
+            print(f"  Found {len(access_logs)} access logs (showing last 3):")
+            for a in access_logs[:3]:
+                 print(f"    - [{a.logged_at}] {a.type} via {a.method} at {a.door_name}")
+                 print(f"      Device: {a.device_name}")
+                 print(f"      Image: {a.image_url}")
+
         
         if all_doors:
             print("\nOptions:")
