@@ -167,3 +167,7 @@ pytest
 ```
 
 CI runs all three on every push and pull request.
+
+## License
+
+[MIT](LICENSE). See the disclaimer at the top: this is an unofficial project, not affiliated with ButterflyMX.
