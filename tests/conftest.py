@@ -3,7 +3,9 @@
 Implements just enough of the accounts (OAuth/login), GraphQL and unlock
 endpoints to exercise the client end to end without touching the real API.
 """
+import asyncio
 import base64
+import copy
 import hashlib
 import itertools
 import urllib.parse
@@ -60,9 +62,12 @@ class FakeButterflyMX:
         self.redirect_state_override = None
         self.login_page_has_token = True
         self.graphql_override = None  # (status, body) to return instead of real data
+        self.graphql_delay = 0.0  # seconds to stall GraphQL responses (timeout tests)
+        self.data = copy.deepcopy(TENANT_DATA)
         # Recorded traffic
         self.requests = []
         self.unlocks = []
+        self.user_agents = []
         self._pending = {}  # state -> (challenge, client_id)
         self._authenticated = set()  # states whose login form was submitted successfully
         self._codes = {}  # code -> challenge
@@ -90,7 +95,9 @@ class FakeButterflyMX:
         self.requests.append("authorize")
         self._pending[q["state"]] = (q["code_challenge"], q["client_id"])
         field = '<input name="authenticity_token" value="csrf-123">' if self.login_page_has_token else ""
-        return web.Response(text=f"<form>{field}</form>", content_type="text/html")
+        resp = web.Response(text=f"<form>{field}</form>", content_type="text/html")
+        resp.set_cookie("_accounts_session", "abc")  # Rails session cookie
+        return resp
 
     async def login(self, request):
         self.requests.append("login")
@@ -127,7 +134,9 @@ class FakeButterflyMX:
         body = {"access_token": access, "token_type": "Bearer", "expires_in": self.expires_in}
         if grant == "authorization_code" or self.rotate_refresh_tokens:
             body["refresh_token"] = refresh
-        return web.json_response(body)
+        resp = web.json_response(body)
+        resp.set_cookie("_accounts_session", "abc")  # the real token endpoint sets this too
+        return resp
 
     # --- api.butterflymx.com ---
 
@@ -137,6 +146,9 @@ class FakeButterflyMX:
 
     async def graphql(self, request):
         self.requests.append("graphql")
+        self.user_agents.append(request.headers.get("User-Agent"))
+        if self.graphql_delay:
+            await asyncio.sleep(self.graphql_delay)
         if not self._authorized(request):
             return web.Response(status=401, text='{"error":"unauthorized"}')
         if self.graphql_override:
@@ -150,10 +162,11 @@ class FakeButterflyMX:
         ids = next(iter(payload["variables"].values()))
         if ids != [TENANT_ID]:
             return web.json_response({"data": {"nodes": [None]}})
-        for field in TENANT_DATA:
-            if field in query:
-                return web.json_response({"data": {"nodes": [{"id": TENANT_ID, field: TENANT_DATA[field]}]}})
-        return web.json_response({"errors": [{"message": "unknown query"}]})
+        node = {"id": TENANT_ID}
+        node.update({k: v for k, v in self.data.items() if k in query})
+        if len(node) == 1:
+            return web.json_response({"errors": [{"message": "unknown query"}]})
+        return web.json_response({"data": {"nodes": [node]}})
 
     async def unlock(self, request):
         self.requests.append("unlock")
@@ -183,23 +196,27 @@ async def server(aiohttp_server, fake):
 
 
 @pytest.fixture
-def make_client(server, tmp_path):
+async def make_client(server, tmp_path):
     """Build a client pointed at the fake server. Tokens go to a temp file."""
     base = str(server.make_url("")).rstrip("/")
+    clients = []
 
     def _make(email=EMAIL, password=PASSWORD, token_file=tmp_path / "tokens.json", **kwargs):
-        client = ButterflyMXClient(email, password, token_file=str(token_file) if token_file else None, **kwargs)
+        client = ButterflyMXClient(email, password, token_file=token_file, **kwargs)
         client.BASE_URL = base
         client.API_URL = f"{base}/graphql"
         client.UNLOCK_URL = f"{base}/unlock"
+        clients.append(client)
         return client
 
-    return _make
+    yield _make
+    for c in clients:
+        await c.close()
 
 
 @pytest.fixture
 async def client(make_client):
     """A client that has already logged in."""
     c = make_client()
-    assert await c.login()
+    await c.login()
     return c

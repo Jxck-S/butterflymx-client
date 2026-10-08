@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "butterflymx-client"
-version = "1.1.0"
+version = "2.0.0"
 description = "Unofficial ButterflyMX API Client"
 readme = "README.md"
 authors = [{ name = "Jack Sweeney" }]
@@ -16,10 +16,13 @@ Homepage = "https://github.com/Jxck-S/butterflymx-client"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-aiohttp>=1.0", "pytest-asyncio>=0.23"]
-dev = ["butterflymx-client[test]", "ruff"]
+dev = ["butterflymx-client[test]", "ruff", "mypy"]
 
 [tool.setuptools]
 packages = ["butterflymx"]
+
+[tool.setuptools.package-data]
+butterflymx = ["py.typed"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -31,3 +34,6 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.mypy]
+files = ["butterflymx"]
