@@ -11,7 +11,7 @@ class Access:
     """A door release (someone opened a door)."""
 
     def __init__(self, data: dict[str, Any]) -> None:
-        self.id: str = data.get("id")
+        self.id: str = data["id"]
         self.logged_at: str | None = data.get("loggedAt")
         self.image_url: str | None = data.get("imageUrl")
         self.type: str | None = data.get("type")  # e.g. VISITOR, TENANT

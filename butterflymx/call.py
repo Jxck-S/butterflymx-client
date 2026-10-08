@@ -9,7 +9,7 @@ class Call:
     """An intercom call."""
 
     def __init__(self, data: dict[str, Any]) -> None:
-        self.id: str = data.get("id")
+        self.id: str = data["id"]
         self.logged_at: str | None = data.get("loggedAt")
         self.status: str | None = data.get("displayStatus")  # e.g. OPENED_DOOR, MISSED
         self.type: str | None = data.get("notificationType")  # e.g. VISITOR

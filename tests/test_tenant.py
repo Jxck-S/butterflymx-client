@@ -1,6 +1,22 @@
-from butterflymx import Access, Call, Door, Message, Tenant
+import pytest
+
+from butterflymx import (
+    Access,
+    ButterflyMXApiError,
+    ButterflyMXConnectionError,
+    Call,
+    Door,
+    Message,
+    Tenant,
+    TenantOverview,
+)
 
 from .conftest import TENANT_ID
+
+
+@pytest.fixture
+async def tenant(client):
+    return (await client.get_tenants())[0]
 
 
 async def test_get_tenants(client):
@@ -11,8 +27,7 @@ async def test_get_tenants(client):
     assert tenants[0].name == "Unit 101"
 
 
-async def test_get_doors(client):
-    tenant = (await client.get_tenants())[0]
+async def test_get_doors(tenant):
     doors = await tenant.get_doors()
 
     assert [d.id for d in doors] == ["ap-1", "ap-2"]
@@ -26,8 +41,13 @@ async def test_get_doors(client):
     assert garage.building_name == "Unknown"
 
 
-async def test_get_messages(client):
-    tenant = (await client.get_tenants())[0]
+async def test_get_door(tenant):
+    door = await tenant.get_door("ap-2")
+    assert door.name == "Garage"
+    assert await tenant.get_door("nope") is None
+
+
+async def test_get_messages(tenant):
     msgs = await tenant.get_messages()
 
     assert all(isinstance(m, Message) for m in msgs)
@@ -38,8 +58,7 @@ async def test_get_messages(client):
     assert msgs[1].source == "Unknown"
 
 
-async def test_get_calls(client):
-    tenant = (await client.get_tenants())[0]
+async def test_get_calls(tenant):
     calls = await tenant.get_calls()
 
     assert len(calls) == 1 and isinstance(calls[0], Call)
@@ -47,8 +66,7 @@ async def test_get_calls(client):
     assert calls[0].device == "Front Lobby"
 
 
-async def test_get_access_logs(client):
-    tenant = (await client.get_tenants())[0]
+async def test_get_access_logs(tenant):
     logs = await tenant.get_access_logs()
 
     assert len(logs) == 1 and isinstance(logs[0], Access)
@@ -57,26 +75,45 @@ async def test_get_access_logs(client):
     assert logs[0].method == "SWIPE_TO_OPEN"
 
 
+async def test_get_overview_is_one_request(tenant, fake):
+    fake.requests.clear()
+
+    overview = await tenant.get_overview()
+
+    assert fake.requests == ["graphql"]
+    assert isinstance(overview, TenantOverview)
+    assert [d.id for d in overview.doors] == ["ap-1", "ap-2"]
+    assert [m.id for m in overview.messages] == ["m-2", "m-1"]
+    assert [c.id for c in overview.calls] == ["c-1"]
+    assert [a.id for a in overview.access_logs] == ["a-1"]
+
+
 async def test_unknown_tenant_returns_empty_lists(client):
     tenant = Tenant({"id": "someone-else", "name": "x"}, client=client)
     assert await tenant.get_doors() == []
     assert await tenant.get_messages() == []
     assert await tenant.get_calls() == []
     assert await tenant.get_access_logs() == []
+    assert await tenant.get_overview() == TenantOverview()
 
 
-async def test_graphql_errors_return_empty_lists(client, fake):
-    tenant = (await client.get_tenants())[0]
+async def test_graphql_errors_raise(client, tenant, fake):
     fake.graphql_override = (200, '{"data": null, "errors": [{"message": "schema changed"}]}')
-    assert await client.get_tenants() == []
-    assert await tenant.get_doors() == []
-    assert await tenant.get_messages() == []
-    assert await tenant.get_calls() == []
-    assert await tenant.get_access_logs() == []
+    for call in (client.get_tenants, tenant.get_doors, tenant.get_messages, tenant.get_calls,
+                 tenant.get_access_logs, tenant.get_overview):
+        with pytest.raises(ButterflyMXApiError):
+            await call()
 
 
-async def test_http_failure_returns_empty_lists(client, fake):
-    tenant = (await client.get_tenants())[0]
+async def test_unexpected_tenants_shape_raises(client, fake):
+    fake.graphql_override = (200, '{"data": {"tenants": null}}')
+    with pytest.raises(ButterflyMXApiError):
+        await client.get_tenants()
+
+
+async def test_http_failure_raises(client, tenant, fake):
     fake.graphql_override = (503, "unavailable")
-    assert await client.get_tenants() == []
-    assert await tenant.get_calls() == []
+    with pytest.raises(ButterflyMXConnectionError):
+        await client.get_tenants()
+    with pytest.raises(ButterflyMXConnectionError):
+        await tenant.get_calls()

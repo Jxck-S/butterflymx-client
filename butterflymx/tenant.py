@@ -89,7 +89,7 @@ def _nodes(tenant_node: dict[str, Any], key: str) -> list[dict[str, Any]]:
 class Tenant:
     def __init__(self, data: dict[str, Any], client: ButterflyMXClient) -> None:
         self._client = client
-        self.id: str = data.get("id")
+        self.id: str = data["id"]
         self.name: str | None = data.get("name")
 
     def __repr__(self) -> str:

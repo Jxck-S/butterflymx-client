@@ -245,12 +245,15 @@ class ButterflyMXClient:
     async def _refresh_access_token(self) -> bool:
         """Try the refresh token. Returns False if the server rejected it."""
         _LOGGER.debug("Refreshing access token")
-        status, text, _ = await self._request(
-            "POST",
-            f"{self.BASE_URL}/oauth/token",
-            data={"grant_type": "refresh_token", "refresh_token": self.refresh_token, "client_id": self.CLIENT_ID},
-            headers={"User-Agent": self.USER_AGENT},
-        )
+        # Keep the accounts site's cookies out of a caller-provided session
+        async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as session:
+            status, text, _ = await self._request(
+                "POST",
+                f"{self.BASE_URL}/oauth/token",
+                session=session,
+                data={"grant_type": "refresh_token", "refresh_token": self.refresh_token, "client_id": self.CLIENT_ID},
+                headers={"User-Agent": self.USER_AGENT},
+            )
         if status >= 500:
             self._raise_for_status(status, text, "Token refresh")
         if status != 200:
@@ -275,8 +278,8 @@ class ButterflyMXClient:
             "prompt": "login",
         }
 
-        # The login form relies on cookies, so use a throwaway session with its own
-        # cookie jar instead of polluting a caller-provided session.
+        # The login form relies on cookies, so do the whole flow (including the code
+        # exchange) in a throwaway session instead of polluting a caller-provided one.
         async with aiohttp.ClientSession(headers={"User-Agent": self.USER_AGENT}) as session:
             _LOGGER.debug("Fetching login page")
             status, page, _ = await self._request(
@@ -324,17 +327,18 @@ class ButterflyMXClient:
                     code = params.get("code", [None])[0]
                     if not code:
                         raise ButterflyMXAuthError("No authorization code in OAuth redirect")
-                    await self._exchange_code(code, verifier)
+                    await self._exchange_code(session, code, verifier)
                     return
                 status, _, headers = await self._request("GET", location, session=session, allow_redirects=False)
 
         raise ButterflyMXAuthError("Login failed: no OAuth redirect received (check email/password)")
 
-    async def _exchange_code(self, code: str, verifier: str) -> None:
+    async def _exchange_code(self, session: aiohttp.ClientSession, code: str, verifier: str) -> None:
         _LOGGER.debug("Exchanging authorization code for token")
         status, text, _ = await self._request(
             "POST",
             f"{self.BASE_URL}/oauth/token",
+            session=session,
             headers={"User-Agent": self.USER_AGENT},
             data={
                 "grant_type": "authorization_code",

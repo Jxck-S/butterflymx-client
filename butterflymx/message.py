@@ -9,7 +9,7 @@ class Message:
     """A text message left at the intercom."""
 
     def __init__(self, data: dict[str, Any]) -> None:
-        self.id: str = data.get("id")
+        self.id: str = data["id"]
         self.body: str | None = data.get("body")
         self.created_at: str | None = data.get("createdAt")
         self.source: str = _name(data.get("source"))

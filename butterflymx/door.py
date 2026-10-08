@@ -18,7 +18,7 @@ class Door:
         self._apply(data)
 
     def _apply(self, data: dict[str, Any]) -> None:
-        self.id: str = data.get("id")
+        self.id: str = data["id"]
         self.name: str | None = data.get("name")
         self.online: bool | None = data.get("online")
         self.open_duration: int | None = data.get("openDuration")
