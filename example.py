@@ -1,30 +1,33 @@
 import asyncio
 import getpass
+import logging
+
 from butterflymx import ButterflyMXClient
+
 
 async def main():
     email = input("ButterflyMX email: ")
     password = getpass.getpass("ButterflyMX password: ")
 
     print(f"Using credentials for: {email}")
-        
+
     client = ButterflyMXClient(email, password, token_file="tokens.json")
     if await client.login():
         tenants = await client.get_tenants()
         print(f"\nFound {len(tenants)} Tenants:")
-        
+
         all_doors = []
-        
+
         for t in tenants:
             print(f"- {t.name} (ID: {t.id})")
-            
+
             doors = await t.get_doors()
             print(f"  Found {len(doors)} doors:")
             for d in doors:
                 status = "Online" if d.online else "Offline"
                 print(f"  [{len(all_doors)}] {d.name} ({d.building_name}) - {status}")
                 all_doors.append((d, t.id))
-            
+
             # Fetch & Print Messages
             msgs = await t.get_messages()
             print(f"  Found {len(msgs)} messages (showing last 3):")
@@ -48,7 +51,7 @@ async def main():
                  print(f"      Device: {a.device_name}")
                  print(f"      Image: {a.image_url}")
 
-        
+
         if all_doors:
             print("\nOptions:")
             print("Enter the number of the door to open, or 'q' to quit.")
@@ -65,4 +68,5 @@ async def main():
                     print("Invalid input.")
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
