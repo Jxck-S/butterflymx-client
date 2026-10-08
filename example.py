@@ -3,8 +3,9 @@ import getpass
 from butterflymx import ButterflyMXClient
 
 async def main():
+    email = input("ButterflyMX email: ")
+    password = getpass.getpass("ButterflyMX password: ")
 
-    
     print(f"Using credentials for: {email}")
         
     client = ButterflyMXClient(email, password, token_file="tokens.json")

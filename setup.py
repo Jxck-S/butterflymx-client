@@ -8,6 +8,7 @@ setup(
         "aiohttp",
     ],
     description="Unofficial ButterflyMX API Client",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Jack Sweeney",
+    url="https://github.com/Jxck-S/butterflymx-client",
+    python_requires=">=3.10",
 )

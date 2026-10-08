@@ -1,6 +1,13 @@
 # ButterflyMX Python Client
 <img src="assets/pymx.png" width="300" />
 
+> [!WARNING]
+> **For educational and personal use only.** This library is an unofficial, independent project. It is not affiliated with, endorsed by, or supported by ButterflyMX. It works by using the same private API as the official mobile app, which can change or stop working at any time without notice.
+>
+> - Use it only with your own account and only for doors you are authorized to access.
+> - You are responsible for complying with ButterflyMX's Terms of Service and your building's policies.
+> - This software is provided "as is", without warranty of any kind. The authors are not liable for any damages, account suspensions, or security issues resulting from its use.
+
 A reverse-engineered Python client for the ButterflyMX Intercom API. This client allows you to authenticate, retrieve tenant information, view messages and call history, and remotely unlock doors (access points).
 
 ## Features
@@ -16,23 +23,20 @@ A reverse-engineered Python client for the ButterflyMX Intercom API. This client
 
 ## Installation
 
-1.  **Requirements**: Python 3.6+
-2.  **Dependencies**: Install required packages:
-    ```bash
-    pip install aiohttp
-    ```
+Requires Python 3.10+.
+
+```bash
+pip install git+https://github.com/Jxck-S/butterflymx-client.git
+```
 
 ## Usage
 
-1.  Open `example.py` and update the credentials in the `if __name__ == "__main__":` block (or use the provided defaults if valid).
-2.  Run the script:
+1.  Run the example script and enter your ButterflyMX email and password when prompted:
     ```bash
     python3 example.py
     ```
-    *Note: The script now uses `asyncio`. Ensure you run it in an environment that supports `asyncio` (Python 3.7+).*
-
-3.  **First Run**: The script will perform a full login. It might ask you to copy/paste a URL or code.
-4.  **Subsequent Runs**: It will load `tokens.json`.
+2.  **First Run**: The script performs a full login and saves tokens to `tokens.json`.
+3.  **Subsequent Runs**: It loads `tokens.json` and refreshes the access token as needed.
 5.  **Interaction**: The script lists your tenants, doors, recent messages, and call history. It then prompts you to validly unlock a door.
 
 ## API Documentation
@@ -43,11 +47,20 @@ The main controller for interacting with the API.
 
 **Initialization**
 ```python
-client = ButterflyMXClient(email, password, token_file="tokens.json")
+client = ButterflyMXClient(email, password, token_file="tokens.json", client_id=None)
 ```
 *   `email`: Your login email.
 *   `password`: Your login password.
-*   `token_file`: (Optional) Path to save/load authentication tokens. Defaults to `"tokens.json"`.
+*   `token_file`: (Optional) Path to save/load authentication tokens. Defaults to `"tokens.json"`. Pass `None` to keep tokens in memory only.
+*   `client_id`: (Optional) OAuth client ID. Defaults to the official mobile app's public client ID (see below).
+
+**Authentication & token refresh**
+
+Access tokens last about 24 hours. Every request checks the token first. If it is expired or within 60 seconds of expiring, the client refreshes it with the refresh token. If the refresh fails, it logs in again with your email and password. If a request still gets a `401`, the client forces a refresh and retries once.
+
+**About the client ID**
+
+The default `CLIENT_ID` is the public OAuth client ID that the official ButterflyMX mobile app uses. It is not a secret: the login uses PKCE, which is designed for apps that cannot keep secrets, and the ID is visible in the app's network traffic. If ButterflyMX changes it, you can find the new one by intercepting the app's login with a proxy like [mitmproxy](https://mitmproxy.org/) or Proxyman. Look for the `client_id` parameter on the request to `https://accounts.butterflymx.com/oauth/authorize`, then pass it as `client_id=...`.
 
 **Methods**
 

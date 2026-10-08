@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import re
 import os
+import secrets
 import urllib.parse
 import json
 import time
@@ -15,8 +16,10 @@ class ButterflyMXClient:
     API_URL = "https://api.butterflymx.com/denizen/v1/graphql"
     USER_AGENT = "butterflymx/699 CFNetwork/3860.200.71 Darwin/25.1.0"
 
-    def __init__(self, email, password, token_file="tokens.json"):
+    def __init__(self, email, password, token_file="tokens.json", client_id=None):
         self.email = email
+        if client_id:
+            self.CLIENT_ID = client_id
         self.password = password
         self.token_file = token_file
         self.access_token = None
@@ -104,6 +107,8 @@ class ButterflyMXClient:
         print("Step 1: Preparing PKCE...")
         verifier = generate_code_verifier()
         challenge = generate_code_challenge(verifier)
+        nonce = secrets.token_urlsafe(16)
+        state = secrets.token_urlsafe(16)
         
         # 1. Authorize URL
         auth_params = {
@@ -113,8 +118,8 @@ class ButterflyMXClient:
             "scope": "openid profile",
             "code_challenge": challenge,
             "code_challenge_method": "S256",
-            "nonce": "random_nonce_value", 
-            "state": "random_state_value",
+            "nonce": nonce,
+            "state": state,
             "prompt": "login"
         }
         auth_url = f"{self.BASE_URL}/oauth/authorize"
@@ -175,6 +180,9 @@ class ButterflyMXClient:
                     parsed = urllib.parse.urlparse(location)
                     params = urllib.parse.parse_qs(parsed.query)
                     code = params.get('code', [None])[0]
+                    if params.get('state', [None])[0] != state:
+                        print("State mismatch in redirect, aborting login")
+                        return False
                     
                     if code:
                         return await self._exchange_code(code, verifier)
