@@ -13,7 +13,6 @@ class Door:
         return f"<Door {self.id}: {self.name} ({self.building_name}) - {status}>"
 
     async def open(self):
-        import aiohttp
         print(f"Attempting to open door {self.name} ({self.id})...")
         unlock_url = "https://api.unlock.prod.butterflymx.com/v1/access-point"
         payload = {
@@ -21,14 +20,9 @@ class Door:
             "source": "mobile_app",
             "tenantId": self.tenant_id
         }
-        headers = self._client.get_headers()
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(unlock_url, json=payload, headers=headers) as resp:
-                if resp.status in [200, 204]:
-                    print("Door opened successfully!")
-                    return True
-                else:
-                    text = await resp.text()
-                    print(f"Failed to open door: {resp.status} - {text}")
-                    return False
+        status, text = await self._client.authed_post(unlock_url, payload)
+        if status in [200, 204]:
+            print("Door opened successfully!")
+            return True
+        print(f"Failed to open door: {status} - {text}")
+        return False

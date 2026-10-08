@@ -1,3 +1,4 @@
+import asyncio
 import aiohttp
 import re
 import os
@@ -21,6 +22,7 @@ class ButterflyMXClient:
         self.access_token = None
         self.refresh_token = None
         self.expires_at = 0
+        self._auth_lock = asyncio.Lock()
         self.load_tokens()
 
     def load_tokens(self):
@@ -218,22 +220,40 @@ class ButterflyMXClient:
                     print(f"Token exchange failed: {text}")
                     return False
 
-    async def query_graphql(self, query, variables=None):
-        if not self.access_token:
+    async def ensure_token(self, force=False):
+        """Make sure we hold a valid access token, refreshing or re-logging in if needed."""
+        async with self._auth_lock:
+            if force:
+                self.expires_at = 0
+            return await self.login()
+
+    async def authed_post(self, url, payload):
+        """POST JSON with auth. Refreshes the token and retries once on 401.
+        Returns (status, body_text)."""
+        if not await self.ensure_token():
             print("Not authenticated.")
-            return None
-            
-        payload = {"query": query, "variables": variables or {}}
-        headers = self.get_headers()
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.API_URL, json=payload, headers=headers) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                else:
+            return None, None
+
+        for attempt in range(2):
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=self.get_headers()) as resp:
+                    status = resp.status
                     text = await resp.text()
-                    print(f"GraphQL Query Failed: {resp.status} - {text}")
-                    return None
+            if status == 401 and attempt == 0:
+                print("Got 401, forcing token refresh and retrying...")
+                if not await self.ensure_token(force=True):
+                    break
+                continue
+            break
+        return status, text
+
+    async def query_graphql(self, query, variables=None):
+        payload = {"query": query, "variables": variables or {}}
+        status, text = await self.authed_post(self.API_URL, payload)
+        if status == 200:
+            return json.loads(text)
+        print(f"GraphQL Query Failed: {status} - {text}")
+        return None
 
     async def get_tenants(self):
         query = """
