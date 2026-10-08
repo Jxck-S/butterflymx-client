@@ -1,7 +1,12 @@
 # ButterflyMX Python Client
 <img src="assets/pymx.png" width="300" />
 
-> **Unofficial.** This project is not affiliated with or endorsed by ButterflyMX. It uses the same private API as the official mobile app, which may change or break at any time. Use at your own risk.
+> [!WARNING]
+> **For educational and personal use only.** This library is an unofficial, independent project. It is not affiliated with, endorsed by, or supported by ButterflyMX. It works by using the same private API as the official mobile app, which can change or stop working at any time without notice.
+>
+> - Use it only with your own account and only for doors you are authorized to access.
+> - You are responsible for complying with ButterflyMX's Terms of Service and your building's policies.
+> - This software is provided "as is", without warranty of any kind. The authors are not liable for any damages, account suspensions, or security issues resulting from its use.
 
 A reverse-engineered Python client for the ButterflyMX Intercom API. This client allows you to authenticate, retrieve tenant information, view messages and call history, and remotely unlock doors (access points).
 
