@@ -64,80 +64,54 @@ The default `CLIENT_ID` is the public OAuth client ID that the official Butterfl
 
 **Methods**
 
-*   **`async login() -> bool`**
-    *   Performs the login flow.
-    *   Checks for an existing valid token in `tokens.json`.
-    *   If invalid, tries to refresh using the refresh token.
-    *   If refresh fails, performs a full OAuth PKCE login (scraping login page, handling callbacks).
-    *   Returns `True` if authenticated, `False` otherwise.
-
-*   **`async get_tenants() -> list`**
-    *   Fetches the list of tenants associated with the account.
-    *   Returns a list of dictionaries containing tenant `id` and `name`.
-
-*   **`async get_doors(tenant_id: str) -> list`**
-    *   Fetches accessible doors (access points) for a specific tenant.
-    *   Returns a list of dictionaries with door details (`id`, `name`, `online` status, `building` name).
-
-*   **`async get_messages(tenant_id: str) -> List[Message]`**
-    *   Fetches text messages for the tenant.
-    *   Returns a list of `Message` objects.
-
-*   **`async get_calls(tenant_id: str) -> List[Call]`**
-    *   Fetches the intercom call history for the tenant.
-    *   Returns a list of `Call` objects (including missed calls, visitor calls, etc.).
-
-### `Door`
-
-**Methods**
-*   **`async open() -> bool`**
-    *   Sends a request to unlock this door.
-    *   Returns `True` if successful.
+*   **`async login() -> bool`**: Uses the saved token if it's still valid, otherwise refreshes it, otherwise does a full OAuth PKCE login. Returns `True` if authenticated. You don't need to call this before other methods: every request makes sure the token is valid first.
+*   **`async get_tenants() -> list[Tenant]`**: The tenants (units) on this account.
+*   **`async query_graphql(query, variables=None) -> dict | None`**: Runs a raw GraphQL query. Returns the response JSON, or `None` on an HTTP error.
 
 ### `Tenant`
 
-**Methods**
-*   **`async get_doors() -> List[Door]`**
-    *   Fetches accessible doors for this tenant.
-*   **`async get_messages() -> List[Message]`**
-    *   Fetches text messages for this tenant.
-*   **`async get_calls() -> List[Call]`**
-    *   Fetches call history for this tenant.
+Attributes: `id`, `name`.
 
-### `ButterflyMXClient`
+*   **`async get_doors() -> list[Door]`**: Doors (access points) this tenant can open.
+*   **`async get_messages() -> list[Message]`**: Text messages, newest first.
+*   **`async get_calls() -> list[Call]`**: Intercom call history, newest first.
+*   **`async get_access_logs() -> list[Access]`**: Door releases, newest first.
 
-**Methods**
-*   **`async get_tenants() -> List[Tenant]`**
-    *   Fetches the list of tenants associated with the account.
+### `Door`
 
-A simple data class representing a text message.
+Attributes: `id`, `name`, `online`, `open_duration`, `building_name`, `tenant_id`.
 
-**Attributes**
-*   `id`: Unique message ID.
-*   `body`: Content of the message.
-*   `created_at`: Timestamp string.
-*   `source`: Name of the sender/device (e.g., "Elevator 4").
+*   **`async open() -> bool`**: Unlocks the door. Returns `True` if successful.
+
+### `Message`
+
+Attributes: `id`, `body`, `created_at`, `source` (device name, e.g. "Front Lobby"), `visitor_name`, `image_url`.
 
 ### `Call`
 
-A data class representing an intercom call.
+Attributes: `id`, `logged_at`, `status` (e.g. `OPENED_DOOR`, `MISSED`), `type` (e.g. `VISITOR`), `device`, `image_url`.
 
-**Attributes**
-*   `id`: Unique call ID.
-*   `logged_at`: Timestamp of the call.
-*   `status`: e.g., "CONNECTED", "MISSED".
-*   `type`: e.g., "VISITOR".
-*   `device`: Name of the intercom device (e.g., "Front Main Lobby").
-*   `image_url`: URL to a snapshot image of the caller.
+### `Access`
 
-## File Structure
-*   `butterflymx/`:
-    *   `client.py`: Main library code (`ButterflyMXClient`).
-    *   `utils.py`: Helper functions.
-    *   `tenant.py`: `Tenant` class.
-    *   `door.py`: `Door` class.
-    *   `message.py`: `Message` class.
-    *   `call.py`: `Call` class.
-    *   `__init__.py`: Exports all classes.
-*   `example.py`: Example usage script.
-*   `tokens.json`: (Generated) Stores session tokens.
+Attributes: `id`, `logged_at`, `type` (e.g. `TENANT`, `VISITOR`), `method` (e.g. `SWIPE_TO_OPEN`), `door_name`, `device_name`, `image_url`.
+
+## Logging
+
+The library logs through Python's `logging` module under the `butterflymx` logger. To see what it's doing:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+## Development
+
+The tests run against a local fake ButterflyMX server, so they never touch the real API or need an account.
+
+```bash
+pip install -e ".[dev]"
+ruff check .
+pytest
+```
+
+CI runs both on every push and pull request.

@@ -1,8 +1,14 @@
-import json
+from .access import Access
+from .call import Call
 from .door import Door
 from .message import Message
-from .call import Call
-from .access import Access
+
+
+def _tenant_node(data):
+    """Return the tenant node from a `nodes(ids: [...])` response, or {}."""
+    nodes = ((data or {}).get('data') or {}).get('nodes') or []
+    return (nodes[0] if nodes else None) or {}
+
 
 class Tenant:
     def __init__(self, data, client):
@@ -36,14 +42,10 @@ class Tenant:
             }
         }
         """
-        print(f"Fetching Doors (Access Points) for Tenant {self.id}...")
         data = await self._client.query_graphql(query, variables={"ids": [self.id]})
-        
-        if data and 'data' in data and 'nodes' in data['data']:
-            tenant_node = data['data']['nodes'][0]
-            if tenant_node and 'accessPoints' in tenant_node:
-                return [Door(d, tenant_id=self.id, client=self._client) for d in tenant_node['accessPoints']['nodes']]
-        return []
+
+        nodes = (_tenant_node(data).get('accessPoints') or {}).get('nodes') or []
+        return [Door(d, tenant_id=self.id, client=self._client) for d in nodes]
 
     async def get_messages(self):
         query = """
@@ -71,16 +73,10 @@ class Tenant:
           }
         }
         """
-        print(f"Fetching Messages for Tenant {self.id}...")
         data = await self._client.query_graphql(query, variables={"tenantIds": [self.id]})
-        
-        messages = []
-        if data and 'data' in data and 'nodes' in data['data']:
-            tenant_node = data['data']['nodes'][0]
-            if tenant_node and 'messages' in tenant_node:
-                for msg_data in tenant_node['messages']['nodes']:
-                    messages.append(Message(msg_data))
-        return messages
+
+        nodes = (_tenant_node(data).get('messages') or {}).get('nodes') or []
+        return [Message(d) for d in nodes]
 
     async def get_calls(self):
         query = """
@@ -108,16 +104,10 @@ class Tenant:
           }
         }
         """
-        print(f"Fetching Calls for Tenant {self.id}...")
         data = await self._client.query_graphql(query, variables={"tenantIds": [self.id]})
-        
-        calls = []
-        if data and 'data' in data and 'nodes' in data['data']:
-            tenant_node = data['data']['nodes'][0]
-            if tenant_node and 'calls' in tenant_node:
-                for call_data in tenant_node['calls']['nodes']:
-                    calls.append(Call(call_data))
-        return calls
+
+        nodes = (_tenant_node(data).get('calls') or {}).get('nodes') or []
+        return [Call(d) for d in nodes]
 
     async def get_access_logs(self):
         query = """
@@ -145,13 +135,7 @@ class Tenant:
           }
         }
         """
-        print(f"Fetching Access Logs (Door Releases) for Tenant {self.id}...")
         data = await self._client.query_graphql(query, variables={"tenantIds": [self.id]})
-        
-        access_logs = []
-        if data and 'data' in data and 'nodes' in data['data']:
-            tenant_node = data['data']['nodes'][0]
-            if tenant_node and 'doorReleases' in tenant_node:
-                for access_data in tenant_node['doorReleases']['nodes']:
-                    access_logs.append(Access(access_data))
-        return access_logs
+
+        nodes = (_tenant_node(data).get('doorReleases') or {}).get('nodes') or []
+        return [Access(d) for d in nodes]

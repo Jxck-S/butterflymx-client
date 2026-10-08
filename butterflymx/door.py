@@ -1,3 +1,8 @@
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+
+
 class Door:
     def __init__(self, data, tenant_id, client):
         self._client = client
@@ -13,16 +18,14 @@ class Door:
         return f"<Door {self.id}: {self.name} ({self.building_name}) - {status}>"
 
     async def open(self):
-        print(f"Attempting to open door {self.name} ({self.id})...")
-        unlock_url = "https://api.unlock.prod.butterflymx.com/v1/access-point"
+        _LOGGER.info("Opening door %s (%s)", self.name, self.id)
         payload = {
             "accessPointId": self.id,
             "source": "mobile_app",
             "tenantId": self.tenant_id
         }
-        status, text = await self._client.authed_post(unlock_url, payload)
+        status, text = await self._client.authed_post(self._client.UNLOCK_URL, payload)
         if status in [200, 204]:
-            print("Door opened successfully!")
             return True
-        print(f"Failed to open door: {status} - {text}")
+        _LOGGER.error("Failed to open door %s: %s - %s", self.name, status, text)
         return False

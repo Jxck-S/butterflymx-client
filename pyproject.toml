@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "butterflymx-client"
+version = "1.1.0"
+description = "Unofficial ButterflyMX API Client"
+readme = "README.md"
+authors = [{ name = "Jack Sweeney" }]
+requires-python = ">=3.10"
+dependencies = ["aiohttp"]
+
+[project.urls]
+Homepage = "https://github.com/Jxck-S/butterflymx-client"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-aiohttp>=1.0", "pytest-asyncio>=0.23"]
+dev = ["butterflymx-client[test]", "ruff"]
+
+[tool.setuptools]
+packages = ["butterflymx"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
