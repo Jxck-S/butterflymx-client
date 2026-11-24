@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<!-- Sanitized from https://accounts.butterflymx.com phone sign-in (November 2026).
+     POST /login/phone with a syntactically valid number returns 200 and this
+     page. There is no Location redirect. __CSRF_TOKEN__ is a placeholder.
+     The masked number is the site's own example, not an account.
+     Email/password two-factor is the same host but was not reachable without
+     a real password. This page has no resend control, only "Try a different number". -->
+<html lang="en">
+<body>
+  <h1>Enter verification code</h1>
+  <p>We sent a code to +121****34</p>
+  <!--ERROR-->
+  <form method="POST" action="/login/phone/verify">
+    <input type="hidden" name="_csrf_token" value="__CSRF_TOKEN__">
+    <label for="code"><span>Verification code</span></label>
+    <input type="text" id="code" name="code" required autocomplete="one-time-code"
+      inputmode="numeric" pattern="[0-9]*" maxlength="6" autofocus>
+    <input type="submit" value="Verify">
+  </form>
+  <a href="/login/phone">Try a different number</a>
+</body>
+</html>
