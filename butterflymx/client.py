@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import inspect
 import json
 import logging
@@ -10,6 +11,8 @@ import secrets
 import time
 import urllib.parse
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any
 
 import aiohttp
@@ -18,6 +21,8 @@ from .exceptions import (
     ButterflyMXApiError,
     ButterflyMXAuthError,
     ButterflyMXConnectionError,
+    ButterflyMXInvalidVerificationCode,
+    ButterflyMXVerificationRequired,
 )
 from .tenant import Tenant
 from .utils import generate_code_challenge, generate_code_verifier
@@ -29,6 +34,329 @@ TokenCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 # Refresh this many seconds before the access token actually expires
 EXPIRY_BUFFER = 60
 DEFAULT_EXPIRES_IN = 86400
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# The accounts site has used both names: Rails `authenticity_token`, then the
+# identity service's `_csrf_token`. Field names changed with them.
+_TOKEN_FIELDS = ("authenticity_token", "_csrf_token")
+_EMAIL_FIELDS = ("login[email]", "email")
+_PASSWORD_FIELDS = ("login[password]", "password")
+# The phone sign-in code page (Nov 2026) uses name="code" and
+# autocomplete="one-time-code". The other names are the same idea on a form
+# we have not been shown yet (email two-factor needs a real password).
+_CODE_FIELD_NAMES = {"code", "otp", "verification_code", "one_time_code", "otp_attempt"}
+_INVALID_CODE_TEXT = (
+    "invalid verification code",
+    "verification code expired",
+    "expired verification code",
+    "code has expired",
+)
+_RESEND_RE = re.compile(r"\bresend\b")
+
+
+class _LoginFormParser(HTMLParser):
+    """Collect each form's action and inputs, plus links, from a login page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.forms: list[dict[str, Any]] = []
+        self.anchors: list[dict[str, str]] = []
+        self._current: dict[str, Any] | None = None
+        self._button: dict[str, Any] | None = None
+        self._anchor: dict[str, str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = dict(attrs)
+        if tag == "form":
+            self._current = {
+                "action": attr.get("action") or "",
+                "method": (attr.get("method") or "GET").upper(),
+                "inputs": [],
+            }
+            self.forms.append(self._current)
+        elif tag == "input" and self._current is not None:
+            self._current["inputs"].append(attr)
+        elif tag == "button" and self._current is not None:
+            self._button = {
+                "type": attr.get("type") or "submit",
+                "name": attr.get("name"),
+                "value": attr.get("value"),
+                "text": "",
+            }
+            self._current["inputs"].append(self._button)
+        elif tag == "a":
+            self._anchor = {"href": attr.get("href") or "", "text": ""}
+
+    def handle_data(self, data: str) -> None:
+        if self._button is not None:
+            self._button["text"] += data
+        if self._anchor is not None:
+            self._anchor["text"] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form":
+            self._current = None
+            self._button = None
+        elif tag == "button":
+            self._button = None
+        elif tag == "a" and self._anchor is not None:
+            self.anchors.append(self._anchor)
+            self._anchor = None
+
+
+def _select_login_form(forms: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The email/password form, not the Microsoft/Google SSO forms beside it."""
+
+    def names(form: dict[str, Any]) -> set[str]:
+        return {item.get("name") for item in form["inputs"] if item.get("name")}
+
+    for form in forms:
+        found = names(form)
+        if found & set(_EMAIL_FIELDS) or found & set(_PASSWORD_FIELDS):
+            return form
+    for form in forms:
+        if names(form) & set(_TOKEN_FIELDS):
+            return form
+    return None
+
+
+def _parse_login_form(page: str, email: str, password: str) -> tuple[str, dict[str, str]] | None:
+    """Return `(action, fields)` for the login POST, or None if no token is present.
+
+    Hidden fields (including `return_to`) are copied through. HTML entities in
+    values are decoded, so a `return_to` of `/oauth/authorize?a=1&b=2` is
+    posted as `/oauth/authorize?a=1&b=2`.
+    """
+    parser = _LoginFormParser()
+    parser.feed(page)
+    form = _select_login_form(parser.forms)
+    if form is None:
+        return None
+
+    fields: dict[str, str] = {}
+    email_field: str | None = None
+    password_field: str | None = None
+    for item in form["inputs"]:
+        name = item.get("name")
+        if not name:
+            continue
+        value = item.get("value") or ""
+        kind = (item.get("type") or "").lower()
+        if name in _EMAIL_FIELDS:
+            email_field = name
+        elif name in _PASSWORD_FIELDS:
+            password_field = name
+        elif name == "commit":
+            fields["commit"] = value or fields.get("commit", "")
+        elif kind in ("hidden", "") and (kind == "hidden" or value or name in _TOKEN_FIELDS):
+            fields[name] = value
+
+    if not any(name in fields for name in _TOKEN_FIELDS):
+        return None
+    if email_field is None:
+        email_field = "login[email]" if "authenticity_token" in fields else "email"
+    if password_field is None:
+        password_field = "login[password]" if "authenticity_token" in fields else "password"
+    fields[email_field] = email
+    fields[password_field] = password
+    if not fields.get("commit"):
+        fields["commit"] = "Sign in with email"
+    return form.get("action") or "/login", fields
+
+
+@dataclass
+class _VerificationForm:
+    """The code form currently on screen, and a resend control if the page has one."""
+
+    action: str
+    code_field: str
+    fields: dict[str, str]
+    resend_method: str | None = None
+    resend_action: str | None = None
+    resend_fields: dict[str, str] | None = None
+
+    @property
+    def can_resend(self) -> bool:
+        return self.resend_action is not None
+
+
+@dataclass
+class _PendingVerification:
+    """OAuth PKCE state plus the code form, kept with the accounts session."""
+
+    verifier: str
+    state: str
+    action: str
+    code_field: str
+    fields: dict[str, str]
+    resend_method: str | None = None
+    resend_action: str | None = None
+    resend_fields: dict[str, str] | None = None
+
+    def use_form(self, form: _VerificationForm) -> None:
+        self.action = form.action
+        self.code_field = form.code_field
+        self.fields = dict(form.fields)
+        self.resend_method = form.resend_method
+        self.resend_action = form.resend_action
+        self.resend_fields = dict(form.resend_fields) if form.resend_fields is not None else None
+
+
+def _is_code_input(item: dict[str, Any]) -> bool:
+    name = (item.get("name") or "").strip()
+    lowered = name.lower()
+    autocomplete = (item.get("autocomplete") or "").lower()
+    if autocomplete == "one-time-code":
+        return True
+    if lowered in _CODE_FIELD_NAMES:
+        return True
+    return lowered.endswith(("[code]", "[otp]", "_code", "_otp"))
+
+
+def _hidden_fields(form: dict[str, Any], *, skip: set[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for item in form["inputs"]:
+        name = item.get("name")
+        if not name or name in skip:
+            continue
+        kind = (item.get("type") or "").lower()
+        value = item.get("value") or ""
+        if kind in ("hidden", "") and (kind == "hidden" or value or name in _TOKEN_FIELDS):
+            fields[name] = value
+    return fields
+
+
+def _resend_control(form: dict[str, Any]) -> bool:
+    if _RESEND_RE.search(form.get("action") or ""):
+        return True
+    for item in form["inputs"]:
+        label = f"{item.get('value') or ''} {item.get('text') or ''}"
+        if _RESEND_RE.search(label):
+            return True
+    return False
+
+
+def _parse_verification_form(page: str, page_url: str = "") -> _VerificationForm | None:
+    """The verification-code form, if this page is asking for one.
+
+    Observed on accounts.butterflymx.com (phone sign-in, Nov 2026): a POST form
+    at `/login/phone/verify` with hidden `_csrf_token` and
+    `<input name="code" autocomplete="one-time-code" maxlength="6">`.
+    There is no resend control, only a link back to `/login/phone`.
+    Email/password two-factor was not reachable without a real account; whatever
+    code form that response contains is what gets submitted.
+    """
+    parser = _LoginFormParser()
+    parser.feed(page)
+    code_form: dict[str, Any] | None = None
+    code_field: str | None = None
+    for form in parser.forms:
+        for item in form["inputs"]:
+            if item.get("name") and _is_code_input(item):
+                code_form = form
+                code_field = item["name"]
+                break
+        if code_form is not None:
+            break
+    if code_form is None or code_field is None:
+        return None
+
+    resend_method: str | None = None
+    resend_action: str | None = None
+    resend_fields: dict[str, str] | None = None
+    for form in parser.forms:
+        if form is code_form or not _resend_control(form):
+            continue
+        resend_method = form.get("method") or "POST"
+        resend_action = form.get("action") or page_url
+        resend_fields = _hidden_fields(form, skip=set())
+        break
+    if resend_action is None:
+        for anchor in parser.anchors:
+            if _RESEND_RE.search(anchor["text"]) or _RESEND_RE.search(anchor["href"]):
+                resend_method = "GET"
+                resend_action = anchor["href"]
+                resend_fields = {}
+                break
+
+    return _VerificationForm(
+        action=code_form.get("action") or page_url,
+        code_field=code_field,
+        fields=_hidden_fields(code_form, skip={code_field}),
+        resend_method=resend_method,
+        resend_action=resend_action,
+        resend_fields=resend_fields,
+    )
+
+
+def _page_says_invalid_code(text: str) -> bool:
+    low = text.lower()
+    return any(phrase in low for phrase in _INVALID_CODE_TEXT)
+
+
+def _app_redirect_from_page(page: str, redirect_uri: str) -> str | None:
+    """The `com.butterflymx.oauth://` URL on a returning-to-app page, if any.
+
+    Observed Nov 2026 after the SMS code: HTTP 200, title "Returning to app…",
+    `<a href="com.butterflymx.oauth://oauth?code=…&amp;state=…">` plus
+    `window.location.replace("com.butterflymx.oauth://oauth?code=…&state=…")`.
+    Only a URL that carries an authorization code counts.
+    """
+    parser = _LoginFormParser()
+    parser.feed(page)
+    candidates = [anchor["href"] for anchor in parser.anchors]
+    for match in re.finditer(r"""location\.(?:replace|assign)\(\s*(["'])(.*?)\1\s*\)""", page):
+        candidates.append(match.group(2).replace("\\u0026", "&").replace("\\/", "/"))
+    for candidate in candidates:
+        url = html.unescape(candidate.strip())
+        if url.startswith(redirect_uri) and "code=" in url:
+            return url
+    return None
+
+
+def _describe_page(status: int, text: str) -> str:
+    """A short, value-free summary of an unexpected login page for the error message.
+
+    Form actions and input names only (never input values), plus the title and
+    any visible alert-like text, so a failed login can be diagnosed from logs.
+    """
+    parser = _LoginFormParser()
+    parser.feed(text)
+    forms = [
+        f"{form['method']} {urllib.parse.urlparse(form['action']).path or '?'}"
+        f"[{','.join(sorted({i.get('name') for i in form['inputs'] if i.get('name')}))}]"
+        for form in parser.forms
+    ]
+    title = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+    visible = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)))
+    alerts = re.findall(r"[^.!?]{0,80}(?:error|invalid|incorrect|expired|wrong|try again)[^.!?]{0,80}", visible, re.I)
+    return (
+        f"page HTTP {status}, title={html.unescape(title.group(1).strip()) if title else None!r}, "
+        f"forms={forms}, alerts={[a.strip() for a in alerts[:3]]}"
+    )
+
+
+def _page_says_invalid_password(text: str) -> bool:
+    return "invalid email or password" in text.lower()
+
+
+def _pause_cancellation(task: asyncio.Task[Any] | None) -> bool:
+    """Drop pending cancellation so a cleanup await can finish.
+
+    Returns whether this task was being cancelled. Python 3.11+ re-raises
+    CancelledError at every later await until `uncancel()` runs. Python 3.10
+    has neither method; a caught CancelledError is not repeated automatically.
+    """
+    if task is None:
+        return False
+    cancelling = getattr(task, "cancelling", None)
+    uncancel = getattr(task, "uncancel", None)
+    if not callable(cancelling) or not callable(uncancel):
+        return False
+    paused = False
+    while cancelling():
+        uncancel()
+        paused = True
+    return paused
 
 
 class ButterflyMXClient:
@@ -86,6 +414,10 @@ class ButterflyMXClient:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.expires_at: float = 0
+        # Kept open only while a verification code is outstanding. Separate from
+        # the caller's API session so accounts cookies stay here.
+        self._login_session: aiohttp.ClientSession | None = None
+        self._pending_login: _PendingVerification | None = None
         if tokens:
             self._set_tokens(tokens)
 
@@ -99,9 +431,43 @@ class ButterflyMXClient:
 
     async def close(self) -> None:
         """Close the HTTP session if this client created it."""
-        if self._owns_session and self._session and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        try:
+            await self._discard_login_attempt()
+        finally:
+            # Accounts cleanup re-raises CancelledError. The owned API session
+            # still has to close, and the cancellation still propagates.
+            session = self._session
+            self._session = None
+            if self._owns_session and session is not None and not session.closed:
+                await session.close()
+
+    async def _discard_login_attempt(self) -> None:
+        """Drop a half-finished login, including its accounts cookies.
+
+        A cancelled task would otherwise fail the `await session.close()` and
+        leave the socket open. Pending cancellation is lifted until close
+        finishes; the caller's CancelledError still propagates.
+        """
+        self._pending_login = None
+        session = self._login_session
+        self._login_session = None
+        if session is None or session.closed:
+            return
+        # cancelling()/uncancel() arrived in 3.11. 3.10 is still supported, and
+        # on 3.10 a caught CancelledError does not cancel the next await.
+        # A cancellation that arrives during close() is finished, then re-raised
+        # so client.close() and login() do not report success.
+        task = asyncio.current_task()
+        cancelled = _pause_cancellation(task)
+        try:
+            await session.close()
+        except asyncio.CancelledError:
+            cancelled = True
+            _pause_cancellation(task)
+            if not session.closed:
+                await session.close()
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -220,6 +586,8 @@ class ButterflyMXClient:
 
         Raises:
             ButterflyMXAuthError: wrong email/password.
+            ButterflyMXVerificationRequired: the site asked for a verification code.
+                Submit it with `submit_verification_code` on this same client.
             ButterflyMXConnectionError: couldn't reach ButterflyMX.
         """
         await self.ensure_token()
@@ -238,6 +606,10 @@ class ButterflyMXClient:
                 self.expires_at = 0
             if self._token_is_valid():
                 return
+            # A code challenge is already in progress. Starting another login
+            # would close that accounts session.
+            if self._pending_login is not None and self._pending_login.action:
+                raise self._pending_verification_required()
             if self.refresh_token and await self._refresh_access_token():
                 return
             await self._full_login()
@@ -263,6 +635,91 @@ class ButterflyMXClient:
         _LOGGER.debug("Token refreshed")
         return True
 
+    async def submit_verification_code(self, code: str) -> None:
+        """Finish a login that raised `ButterflyMXVerificationRequired`.
+
+        Posts the code on the same accounts session that accepted the password,
+        then follows the redirects through to the OAuth token exchange.
+        Shares the auth lock with `ensure_token`, so another request cannot
+        start a fresh login and close this session mid-submit.
+        """
+        async with self._auth_lock:
+            pending = self._pending_login
+            session = self._login_session
+            if pending is None or session is None or session.closed or not pending.action:
+                raise ButterflyMXApiError("No verification login is in progress")
+            _LOGGER.debug("Submitting verification code")
+            data = dict(pending.fields)
+            data[pending.code_field] = code
+            keep_session = False
+            try:
+                status, text, headers = await self._request(
+                    "POST",
+                    self._absolute_url(pending.action),
+                    session=session,
+                    allow_redirects=False,
+                    data=data,
+                )
+                self._raise_for_status(status, text, "Verification")
+                await self._complete_login(session, pending, status, text, headers)
+            except (ButterflyMXVerificationRequired, ButterflyMXInvalidVerificationCode):
+                keep_session = True
+                raise
+            finally:
+                if not keep_session:
+                    await self._discard_login_attempt()
+
+    async def resend_verification_code(self) -> None:
+        """Ask ButterflyMX to send another code, when the page offers that.
+
+        The phone verification page observed in Nov 2026 has no resend control
+        (only "Try a different number"). This uses a resend form or link when
+        the code page actually contains one.
+        """
+        async with self._auth_lock:
+            pending = self._pending_login
+            session = self._login_session
+            if pending is None or session is None or session.closed or not pending.action:
+                raise ButterflyMXApiError("No verification login is in progress")
+            if not pending.resend_action or not pending.resend_method:
+                raise ButterflyMXApiError("This verification step does not offer resend")
+            _LOGGER.debug("Requesting another verification code")
+            kwargs: dict[str, Any] = {"allow_redirects": False}
+            if pending.resend_method == "GET":
+                kwargs["params"] = pending.resend_fields or None
+            else:
+                kwargs["data"] = pending.resend_fields or {}
+            # Keep the challenge only when resend returns another code form.
+            # A 401/403 or a redirect back to the login page must not leave the
+            # client stuck on a session that can no longer be resumed.
+            keep_session = False
+            try:
+                status, text, headers = await self._request(
+                    pending.resend_method, self._absolute_url(pending.resend_action), session=session, **kwargs
+                )
+                self._raise_for_status(status, text, "Resend verification code")
+                for _ in range(5):
+                    location = headers.get("Location") if status in _REDIRECT_STATUSES else None
+                    if location and location.startswith(self.REDIRECT_URI):
+                        await self._exchange_code(
+                            session, self._authorization_code(location, pending.state), pending.verifier
+                        )
+                        return
+                    if not location:
+                        break
+                    status, text, headers = await self._request(
+                        "GET", self._absolute_url(location), session=session, allow_redirects=False
+                    )
+                    self._raise_for_status(status, text, "Resend verification code")
+                form = _parse_verification_form(text)
+                if form is None:
+                    raise ButterflyMXApiError("Resend did not return a verification form")
+                pending.use_form(form)
+                keep_session = True
+            finally:
+                if not keep_session:
+                    await self._discard_login_attempt()
+
     async def _full_login(self) -> None:
         verifier = generate_code_verifier()
         state = secrets.token_urlsafe(16)
@@ -278,60 +735,153 @@ class ButterflyMXClient:
             "prompt": "login",
         }
 
-        # The login form relies on cookies, so do the whole flow (including the code
-        # exchange) in a throwaway session instead of polluting a caller-provided one.
-        async with aiohttp.ClientSession(headers={"User-Agent": self.USER_AGENT}) as session:
+        # The login form relies on cookies. Keep them in a session of our own,
+        # not the caller's API session. It stays open when a code is required.
+        await self._discard_login_attempt()
+        # unsafe=True so a test server on an IP address can keep the accounts
+        # cookie. Hostname cookies (accounts.butterflymx.com) are stored either way.
+        session = aiohttp.ClientSession(
+            headers={"User-Agent": self.USER_AGENT},
+            cookie_jar=aiohttp.CookieJar(unsafe=True),
+        )
+        self._login_session = session
+        pending = _PendingVerification(verifier=verifier, state=state, action="", code_field="code", fields={})
+        self._pending_login = pending
+        # Closed on every exit, including CancelledError, unless a code challenge
+        # was actually delivered. `except Exception` does not catch cancellation.
+        keep_session = False
+        try:
             _LOGGER.debug("Fetching login page")
             status, page, _ = await self._request(
                 "GET", f"{self.BASE_URL}/oauth/authorize", session=session, params=auth_params
             )
             self._raise_for_status(status, page, "Fetching login page")
 
-            match = re.search(r'name="authenticity_token" value="([^"]+)"', page)
-            if not match:
-                raise ButterflyMXApiError("Could not find authenticity_token on the login page")
+            parsed = _parse_login_form(page, self.email, self.password)
+            if parsed is None:
+                raise ButterflyMXApiError("Could not find authenticity_token or _csrf_token on the login page")
+            action, form = parsed
 
             _LOGGER.debug("Submitting login form")
             status, text, headers = await self._request(
                 "POST",
-                f"{self.BASE_URL}/login",
+                self._absolute_url(action),
                 session=session,
                 allow_redirects=False,
-                data={
-                    "authenticity_token": match.group(1),
-                    "login[email]": self.email,
-                    "login[password]": self.password,
-                    "commit": "Sign in with email",
-                },
+                data=form,
             )
             self._raise_for_status(status, text, "Login")
 
-            # Rails/Turbo answers a successful login with 200 + <turbo-stream location="...">
+            # The old Rails app answers a successful login with 200 + <turbo-stream location="...">.
+            # The current identity service answers with a 303 whose Location is relative
+            # (`/oauth/authorize?...` on success, `/login/new` when the password is wrong).
+            # A verification code is a 200 page (phone sign-in) or a redirect onto one.
             if status == 200 and "<turbo-stream" in text:
                 match = re.search(r'location="([^"]+)"', text)
                 if match:
-                    location = match.group(1).replace("&amp;", "&")
                     _LOGGER.debug("Following Turbo Stream redirect")
-                    status, _, headers = await self._request(
-                        "GET", f"{self.BASE_URL}{location}", session=session, allow_redirects=False
+                    status, text, headers = await self._request(
+                        "GET",
+                        self._absolute_url(html.unescape(match.group(1))),
+                        session=session,
+                        allow_redirects=False,
                     )
+                    self._raise_for_status(status, text, "Login redirect")
 
-            for _ in range(10):
-                location = headers.get("Location")
-                if status not in (301, 302, 303, 307, 308) or not location:
-                    break
-                if location.startswith(self.REDIRECT_URI):
-                    params = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
-                    if params.get("state", [None])[0] != state:
-                        raise ButterflyMXAuthError("State mismatch in OAuth redirect")
-                    code = params.get("code", [None])[0]
-                    if not code:
-                        raise ButterflyMXAuthError("No authorization code in OAuth redirect")
-                    await self._exchange_code(session, code, verifier)
-                    return
-                status, _, headers = await self._request("GET", location, session=session, allow_redirects=False)
+            await self._complete_login(session, pending, status, text, headers)
+        except (ButterflyMXVerificationRequired, ButterflyMXInvalidVerificationCode):
+            keep_session = True
+            raise
+        finally:
+            if not keep_session:
+                await self._discard_login_attempt()
 
-        raise ButterflyMXAuthError("Login failed: no OAuth redirect received (check email/password)")
+    async def _complete_login(
+        self,
+        session: aiohttp.ClientSession,
+        pending: _PendingVerification,
+        status: int,
+        text: str,
+        headers: Any,
+    ) -> None:
+        """Follow login redirects. Raise if the page wants a code; return after the token exchange."""
+        for _ in range(10):
+            location = headers.get("Location") if status in _REDIRECT_STATUSES else None
+            if location and location.startswith(self.REDIRECT_URI):
+                await self._exchange_code(session, self._authorization_code(location, pending.state), pending.verifier)
+                return
+            if not location:
+                break
+            _LOGGER.debug("Login redirect: HTTP %s to %s", status, urllib.parse.urlparse(location).path)
+            status, text, headers = await self._request(
+                "GET", self._absolute_url(location), session=session, allow_redirects=False
+            )
+            self._raise_for_status(status, text, "Login redirect")
+
+        # The identity service (Nov 2026) can finish with a 200 "Returning to app…"
+        # page whose link and window.location.replace() carry the app redirect,
+        # instead of a 302 to it.
+        app_redirect = _app_redirect_from_page(text, self.REDIRECT_URI)
+        if app_redirect is not None:
+            _LOGGER.debug("Following app redirect from the returning-to-app page")
+            await self._exchange_code(session, self._authorization_code(app_redirect, pending.state), pending.verifier)
+            return
+
+        form = _parse_verification_form(text)
+        if form is not None and _page_says_invalid_code(text):
+            pending.use_form(form)
+            raise self._verification_error(ButterflyMXInvalidVerificationCode, form)
+        if form is not None:
+            _LOGGER.debug("Verification code required")
+            pending.use_form(form)
+            raise self._verification_error(ButterflyMXVerificationRequired, form)
+        if _page_says_invalid_password(text):
+            raise ButterflyMXAuthError("Login failed: invalid email or password")
+        raise ButterflyMXAuthError(
+            f"Login failed: no OAuth redirect received (check email/password); {_describe_page(status, text)}"
+        )
+
+    def _pending_verification_required(self) -> ButterflyMXVerificationRequired:
+        pending = self._pending_login
+        assert pending is not None
+        form = _VerificationForm(
+            action=pending.action,
+            code_field=pending.code_field,
+            fields=dict(pending.fields),
+            resend_method=pending.resend_method,
+            resend_action=pending.resend_action,
+            resend_fields=None if pending.resend_fields is None else dict(pending.resend_fields),
+        )
+        error = self._verification_error(ButterflyMXVerificationRequired, form)
+        assert isinstance(error, ButterflyMXVerificationRequired)
+        return error
+
+    def _verification_error(
+        self,
+        error_type: type[ButterflyMXVerificationRequired] | type[ButterflyMXInvalidVerificationCode],
+        form: _VerificationForm,
+    ) -> ButterflyMXVerificationRequired | ButterflyMXInvalidVerificationCode:
+        error = error_type(can_resend=form.can_resend)
+        error._client = self
+        return error
+
+    def _absolute_url(self, location: str) -> str:
+        """Resolve a possibly relative login URL against the accounts host.
+
+        Relative Locations (`/login/new`, `/oauth/authorize?...`) are what the
+        identity service sends. The `com.butterflymx.oauth://` redirect is
+        already absolute and is returned unchanged.
+        """
+        return urllib.parse.urljoin(f"{self.BASE_URL}/", location)
+
+    def _authorization_code(self, location: str, state: str) -> str:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+        if params.get("state", [None])[0] != state:
+            raise ButterflyMXAuthError("State mismatch in OAuth redirect")
+        code = params.get("code", [None])[0]
+        if not code:
+            raise ButterflyMXAuthError("No authorization code in OAuth redirect")
+        return code
 
     async def _exchange_code(self, session: aiohttp.ClientSession, code: str, verifier: str) -> None:
         _LOGGER.debug("Exchanging authorization code for token")

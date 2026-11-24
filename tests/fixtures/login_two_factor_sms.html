@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<!-- Sanitized stand-in for the email/password two-factor page (November 2026).
+     The recorded page was the same form, plus the site's public layout.
+     The CSRF value and the masked phone number are placeholders.
+     A second form posts a resend. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ButterflyMX - Verify with text message</title>
+</head>
+<body>
+  <h1>Verify with text message</h1>
+  <h2>A 6-digit code has been sent to your phone number ******0000</h2>
+  <form method="POST" action="/login/two_factor_authentication">
+    <input type="hidden" name="_csrf_token" value="__CSRF_TOKEN__">
+    <input type="hidden" name="type" value="sms">
+    <label for="code"><span>Verification code</span></label>
+    <input type="text" id="code" name="code" required autocomplete="one-time-code"
+      inputmode="numeric" pattern="[0-9]*" maxlength="6" autofocus>
+    <input type="submit" value="Use code">
+  </form>
+  <form method="POST" action="/login/two_factor_authentication/new?type=sms">
+    <input type="hidden" name="_csrf_token" value="__CSRF_TOKEN__">
+    <input type="hidden" name="context" value="resend">
+    <button type="submit">Resend code</button>
+  </form>
+  <a href="/login/two_factor_authentication">Verify another way</a>
+</body>
+</html>

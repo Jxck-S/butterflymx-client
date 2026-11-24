@@ -87,13 +87,28 @@ client = ButterflyMXClient(email, password, tokens=load_saved(), on_tokens_updat
 
 Access tokens last about 24 hours. Every request checks the token first. If it is expired or within 60 seconds of expiring, the client refreshes it with the refresh token. If the refresh is rejected, it logs in again with your email and password. If a request still gets a `401`, the client refreshes and retries once. Concurrent requests share a single refresh.
 
+Login accepts the current accounts form (`_csrf_token`, `email`, `password`, and the hidden `return_to` that leads back to the OAuth redirect) and the older Rails form (`authenticity_token`, `login[email]`, `login[password]`).
+
+If the accounts site asks for a verification code, `login()` raises `ButterflyMXVerificationRequired` and keeps that HTTP session open. Finish it with the same client:
+
+```python
+try:
+    await client.login()
+except ButterflyMXVerificationRequired as pending:
+    await pending.submit_code("123456")  # or client.submit_verification_code("123456")
+```
+
+A wrong or expired code raises `ButterflyMXInvalidVerificationCode`. Submit another code on the same client. `resend_verification_code()` asks for a new code when the page has a resend control. The phone verification page observed in November 2026 does not; it only links back to "Try a different number".
+
 **About the client ID**
 
 The default `CLIENT_ID` is the public OAuth client ID that the official ButterflyMX mobile app uses. It is not a secret: the login uses PKCE, which is designed for apps that cannot keep secrets, and the ID is visible in the app's network traffic. If ButterflyMX changes it, you can find the new one by intercepting the app's login with a proxy like [mitmproxy](https://mitmproxy.org/) or Proxyman. Look for the `client_id` parameter on the request to `https://accounts.butterflymx.com/oauth/authorize`, then pass it as `client_id=...`.
 
 **Methods**
 
-*   **`async login() -> None`**: Makes sure the client is authenticated. You don't need to call it: every request does this first. Calling it up front is a handy way to check credentials.
+*   **`async login() -> None`**: Makes sure the client is authenticated. You don't need to call it: every request does this first. Calling it up front is a handy way to check credentials. Raises `ButterflyMXVerificationRequired` when a code is required; the accounts session stays open on this client.
+*   **`async submit_verification_code(code) -> None`**: Post the verification code and finish the OAuth exchange. Same session as the `login()` that raised.
+*   **`async resend_verification_code() -> None`**: Request another code when the verification page offers resend.
 *   **`async get_tenants() -> list[Tenant]`**: The tenants (units) on this account.
 *   **`async query_graphql(query, variables=None) -> dict`**: Runs a raw GraphQL query and returns the response JSON.
 *   **`tokens`**: The current tokens as a dict, in the format `tokens=` accepts.
@@ -136,6 +151,8 @@ All errors inherit from `ButterflyMXError`:
 | Exception | When | What to do |
 |---|---|---|
 | `ButterflyMXAuthError` | Wrong email/password, or tokens rejected even after refreshing | Fix the credentials; retrying won't help |
+| `ButterflyMXVerificationRequired` | A verification code is required after the password. Not an auth error | Submit the code with `submit_verification_code` on the same client |
+| `ButterflyMXInvalidVerificationCode` | That verification code was rejected or expired | Submit another code on the same client, or resend when the page offers it |
 | `ButterflyMXConnectionError` | Network error, timeout, or a 5xx from ButterflyMX | Usually temporary; retry later |
 | `ButterflyMXApiError` | Unexpected response: GraphQL errors, non-JSON, or a changed login page | Likely an API change; please open an issue |
 

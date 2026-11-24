@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<!-- Sanitized ButterflyMX accounts login page (identity service, November 2026).
+     __CSRF_TOKEN__ and __RETURN_TO__ are placeholders. No real token or account data. -->
+<html lang="en">
+<body>
+  <main>
+    <h1>Sign in</h1>
+    <form autocomplete="off" action="/login" method="post">
+      <input type="hidden" name="_csrf_token" value="__CSRF_TOKEN__">
+      <input type="hidden" name="return_to" value="__RETURN_TO__">
+      <label for="login_email">Email</label>
+      <input placeholder="Enter email here" autocomplete="email" type="email" name="email" id="login_email" value="">
+      <label for="login_password">Password</label>
+      <input placeholder="Enter password here" autocomplete="current-password" type="password" name="password" id="login_password">
+      <input type="submit" name="commit" value="Sign in with email">
+    </form>
+    <div id="alternate-login-options">
+      <form method="post" action="/sso/microsoft">
+        <input type="hidden" name="_csrf_token" value="sso-csrf-not-used">
+        <input type="hidden" name="prompt" value="select_account">
+      </form>
+      <form method="post" action="/sso/google">
+        <input type="hidden" name="_csrf_token" value="sso-csrf-not-used">
+      </form>
+    </div>
+  </main>
+</body>
+</html>
